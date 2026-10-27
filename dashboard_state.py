@@ -4,7 +4,7 @@ from typing import Mapping
 import time
 
 
-LOW_BATTERY = 20
+LOW_BATTERY = 10
 
 
 def device_badge(name: str) -> str:
@@ -44,16 +44,24 @@ class TraySummary:
     low: int
     alert_level: int | None
     tooltip: str
+    level: int | None
+    charging: bool
 
 
 def summarize(readings: Mapping) -> TraySummary:
-    """Cached/charging/disconnected readings never trigger a low-battery badge."""
+    """The ring uses the lowest displayed reading; alerts require fresh data."""
     low = [r.level for r in readings.values()
            if r.present and r.ok and not r.stale and r.level is not None
            and r.status not in ("charging", "full", "wired", "asleep", "unplugged", "unknown_proto")
-           and r.level <= LOW_BATTERY]
+           and r.level < LOW_BATTERY]
+    candidates = [r for r in readings.values()
+                  if r.present and r.ok and r.level is not None and 0 <= r.level <= 100]
+    selected = min(candidates, key=lambda r: r.level) if candidates else None
     connected = sum(bool(r.present) for r in readings.values())
     lines = [f"EZ2.4G Dashboard · {connected}/{len(readings)} 台连接"]
+    if selected:
+        suffix = " · 上次电量" if selected.stale else ""
+        lines.append(f"托盘最低：{selected.name or '设备'} {selected.level}%{suffix}")
     for r in readings.values():
         level = f"{r.level}% · " if r.ok and r.level is not None else ""
         stamp = time.strftime("%H:%M", time.localtime(r.ts)) if r.ts else "--:--"
@@ -65,7 +73,43 @@ def summarize(readings: Mapping) -> TraySummary:
     tip = "\n".join(lines)
     if len(tip.encode("utf-16-le")) > 254:
         tip = tip.encode("utf-16-le")[:252].decode("utf-16-le", errors="ignore") + "…"
-    return TraySummary(len(readings), connected, len(low), min(low) if low else None, tip)
+    return TraySummary(len(readings), connected, len(low), min(low) if low else None, tip,
+                       selected.level if selected else None,
+                       bool(selected and not selected.stale and selected.status == "charging"))
+
+
+class LowBatteryAlerts:
+    """One alert per low-battery episode; recover at 12% to avoid threshold spam."""
+    def __init__(self):
+        self.active = set()
+
+    def update(self, readings):
+        notices = []
+        for key, r in readings.items():
+            if not r.present or not r.ok or r.stale or r.level is None:
+                continue
+            if r.status in ("charging", "full", "wired") or r.level >= LOW_BATTERY + 2:
+                self.active.discard(key)
+            elif (r.level < LOW_BATTERY and key not in self.active
+                  and r.status not in ("asleep", "waiting", "unknown_proto", "unplugged")):
+                self.active.add(key)
+                notices.append((key, f"{r.name or '设备'} 电量仅剩 {r.level}%，请及时充电。"))
+        return notices
+
+
+def saved_position(value):
+    if (isinstance(value, dict) and type(value.get("x")) is int
+            and type(value.get("y")) is int
+            and abs(value["x"]) < 100000 and abs(value["y"]) < 100000):
+        return value["x"], value["y"]
+    return None
+
+
+def clamp_position(position, work, size):
+    x, y = position
+    left, top, right, bottom = work
+    width, height = size
+    return max(left, min(x, right - width)), max(top, min(y, bottom - height))
 
 
 def flyout_position(anchor, work, size, gap=10):
@@ -81,5 +125,4 @@ def flyout_position(anchor, work, size, gap=10):
     else:
         y = ay2 - height
         x = ax1 - width - gap if ax1 - width - gap >= left else ax2 + gap
-    return (max(left, min(x, right - width)),
-            max(top, min(y, bottom - height)))
+    return clamp_position((x, y), work, size)

@@ -26,7 +26,8 @@ import random
 import threading
 import time
 from typing import Optional
-from dashboard_state import device_badge, flyout_position, reading_status, summarize
+from dashboard_state import (LowBatteryAlerts, clamp_position, device_badge,
+                             flyout_position, reading_status, saved_position, summarize)
 from vendor_battery import protocol_name, read_battery as read_vendor_battery
 
 UI_SCALE = 1.0
@@ -1399,9 +1400,9 @@ COLORREF = lambda r, g, b: (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16)
 def _level_color(level: Optional[int]) -> tuple[int, int, int]:
     if level is None:
         return (120, 128, 140)
-    if level >= 60:
-        return (34, 197, 94)
     if level >= 30:
+        return (34, 197, 94)
+    if level >= 10:
         return (245, 158, 11)
     return (239, 68, 68)
 
@@ -1469,7 +1470,7 @@ def make_battery_icon(level: Optional[int], light: bool,
         gdi32.Ellipse(memdc, int(cx - radius), int(cy - radius),
                       int(cx + radius), int(cy + radius))
         if level is not None:
-            if charging:
+            if charging and level >= 10:
                 r, g, b = 34, 197, 94          # 充电：弧线绿色
             else:
                 r, g, b = _level_color(level)
@@ -3600,7 +3601,9 @@ class CardMenu:
 
 
 class Panel:
-    LW, LH = 560, 399
+    LW, LH = 640, 460
+    VIEW_TOP, VIEW_BOTTOM = 96, 388
+    CARD_HEIGHT, CARD_GAP = 136, 14
 
     def _f(self, size, bold=False):
         return (FONT, -int(round(size * self.S)),
@@ -3627,6 +3630,7 @@ class Panel:
         self.root.bind("<Escape>", lambda e: self.hide())
         self.root.bind("<FocusOut>", self._on_focus_out, add="+")
         self._last_hidden = 0.0
+        self._saved_position = saved_position(load_config().get("panel_position"))
         self._drag = None
         self._entry = None
         self._entry_key = None
@@ -3718,7 +3722,7 @@ class Panel:
             return
         nx = wx + dx
         ny = wy + dy
-        self.root.geometry(f"+{nx}+{ny}")
+        self._move_to(nx, ny)
         if self._shadow:
             try:
                 self._shadow.move(nx, ny)
@@ -3726,7 +3730,35 @@ class Panel:
                 pass
 
     def _on_release(self, e):
+        if self._drag:
+            origin = self._drag[2:]
+            position = (self.root.winfo_x(), self.root.winfo_y())
+            if position != origin:
+                self._saved_position = position
+                cfg = load_config()
+                cfg["panel_position"] = {"x": position[0], "y": position[1]}
+                save_config(cfg)
         self._drag = None
+
+    def _move_to(self, x, y):
+        # SetWindowPos supports absolute negative coordinates on left/top monitors.
+        hwnd = user32.GetParent(self.hwnd) or self.hwnd
+        user32.SetWindowPos(hwnd, None, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
+
+    def _restore_position(self):
+        if self._saved_position is None:
+            return False
+        x, y = self._saved_position
+        rect = wt.RECT(x, y, x + self.W, y + self.H)
+        monitor = user32.MonitorFromRect(ctypes.byref(rect), 2)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return False
+        work = info.rcWork
+        self._move_to(*clamp_position((x, y),
+                      (work.left, work.top, work.right, work.bottom), (self.W, self.H)))
+        return True
 
     def _on_focus_out(self, event):
         self.root.after(180, self._dismiss_if_unfocused)
@@ -3744,8 +3776,8 @@ class Panel:
         self._startup_var = startup_enabled()
         self.render()
         self.root.deiconify()
-        if self.app.tray:
-            self.root.update_idletasks()
+        self.root.update_idletasks()
+        if not self._restore_position() and self.app.tray:
             self.app.tray.position_dashboard(self)
         try:
             # 叽顶不抢焦点：避免输入法条弹在面板上方
@@ -3836,9 +3868,9 @@ class Panel:
     def _level_rgb(self, lv):
         if lv is None:
             return (109, 127, 150)
-        if lv >= 60:
-            return (61, 220, 151)
         if lv >= 30:
+            return (61, 220, 151)
+        if lv >= 10:
             return self.LW_CHAMP
         return (248, 113, 113)
 
@@ -4110,45 +4142,47 @@ class Panel:
         keys = list(snap.keys())
         summary = summarize(snap)
         self._card_rects = {}
-        content = (len(keys) * 134 - 12) if keys else 122
-        self._max_scroll = max(0.0, content - 256.0)
+        content = (len(keys) * (self.CARD_HEIGHT + self.CARD_GAP) - self.CARD_GAP
+                   if keys else self.CARD_HEIGHT)
+        viewport = self.VIEW_BOTTOM - self.VIEW_TOP
+        self._max_scroll = max(0.0, content - viewport)
         self._scroll = max(0.0, min(self._scroll, self._max_scroll))
-        y = 88 - self._scroll
+        y = self.VIEW_TOP - self._scroll
         if keys:
             for key in keys:
-                self._card(24, y, W - 24, y + 122, key)
-                y += 134
+                self._card(24, y, W - 24, y + self.CARD_HEIGHT, key)
+                y += self.CARD_HEIGHT + self.CARD_GAP
         else:
-            self._empty_card(24, 88, W - 24, 210)
+            self._empty_card(24, self.VIEW_TOP, W - 24, self.VIEW_TOP + self.CARD_HEIGHT)
 
         # 裁剪视口：标题区与底栏用背景色盖住，边界各 1px，避免压掉卡片描边
-        cv.create_rectangle(0, 0, W, 87, fill=_rgb(self.DSH_BG), outline="")
-        cv.create_rectangle(0, 345, W, H, fill=_rgb(self.DSH_BG), outline="")
+        cv.create_rectangle(0, 0, W, self.VIEW_TOP - 1, fill=_rgb(self.DSH_BG), outline="")
+        cv.create_rectangle(0, self.VIEW_BOTTOM + 1, W, H, fill=_rgb(self.DSH_BG), outline="")
 
-        cv.create_text(30, 30, text="设备 Dashboard", anchor="w",
-                       fill=_rgb(self.DSH_TEXT), font=self._f(16, True))
+        cv.create_text(30, 32, text="设备 Dashboard", anchor="w",
+                       fill=_rgb(self.DSH_TEXT), font=self._f(20, True))
         iv = self.app.interval
         iv_text = (f"每 {iv // 60} 分钟自动刷新" if iv % 60 == 0
                    else f"每 {iv} 秒自动刷新")
         counts = f"{summary.total} 台设备 · {summary.connected} 台连接"
         if summary.low:
             counts += f" · {summary.low} 台低电量"
-        cv.create_text(30, 56, text=counts + " · " + iv_text, anchor="w",
-                       fill=_rgb(self.DSH_SUB), font=self._f(9))
-        self._button(W - 136, 20, 76, 28, "刷新", self.app.refresh)
-        self._button(W - 48, 20, 28, 28, "×", self.hide, kind="ghost")
+        cv.create_text(30, 66, text=counts + " · " + iv_text, anchor="w",
+                       fill=_rgb(self.DSH_SUB), font=self._f(11))
+        self._button(W - 146, 18, 82, 34, "刷新", self.app.refresh)
+        self._button(W - 52, 18, 34, 34, "×", self.hide, kind="ghost")
         self._scrollbar()
 
-        upd = self._ctext(24, 372, self._updated_text(), _rgb(self.DSH_MUTED),
-                          self._f(9), anchor="w", tags=("upd_btn",))
+        upd = self._ctext(24, H - 36, self._updated_text(), _rgb(self.DSH_SUB),
+                          self._f(11), anchor="w", tags=("upd_btn",))
         cv.tag_bind("upd_btn", "<Button-1>", lambda e: self.app.refresh())
         cv.tag_bind("upd_btn", "<Enter>",
                     lambda e: cv.configure(cursor="hand2"))
         cv.tag_bind("upd_btn", "<Leave>",
                     lambda e: cv.configure(cursor=""))
-        self._check(380, 372, self._startup_var, "开机自启",
+        self._check(W - 242, H - 36, self._startup_var, "开机自启",
                     lambda: self._toggle_startup())
-        self._button(472, 360, 64, 24, "最小化", self.hide, kind="ghost")
+        self._button(W - 108, H - 53, 84, 34, "收起", self.hide, kind="ghost")
         cv.scale("all", 0, 0, self.S, self.S)
 
     def _draw_border(self):
@@ -4207,10 +4241,11 @@ class Panel:
         cv = self.cv
         W = self.LW
         x1, x2 = W - 14, W - 8
-        y1, y2 = 96, 336
+        y1, y2 = self.VIEW_TOP + 8, self.VIEW_BOTTOM - 8
         track_h = y2 - y1
-        content = self._max_scroll + 256.0
-        thumb_h = max(24.0, track_h * 256.0 / content)
+        viewport = self.VIEW_BOTTOM - self.VIEW_TOP
+        content = self._max_scroll + viewport
+        thumb_h = max(24.0, track_h * viewport / content)
         ty = y1 + (self._scroll / self._max_scroll) * (track_h - thumb_h)
         self._track_h, self._thumb_h = track_h, thumb_h
         draw_round_rect(cv, x1, y1, x2, y2, 3,
@@ -4222,91 +4257,59 @@ class Panel:
         cv.tag_bind("sbar_thumb", "<B1-Motion>", self._sbar_move)
         cv.tag_bind("sbar_thumb", "<ButtonRelease-1>", self._sbar_release)
 
+    def _fit_text(self, text, width, size, bold=False):
+        font = tkfont.Font(font=self._f(size, bold))
+        if font.measure(text) <= width * self.S:
+            return text
+        while text and font.measure(text + "…") > width * self.S:
+            text = text[:-1]
+        return text + "…"
+
     def _card(self, x1, y1, x2, y2, key):
         cv = self.cv
         self._card_rects[key] = (x1, y1, x2, y2)
-        r = (self.app.snapshot().get(key)
-             or Reading(ok=False, name="设备"))
+        r = self.app.snapshot().get(key) or Reading(ok=False, name="设备")
         draw_round_rect(cv, x1, y1, x2, y2, 12,
-                        fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER),
-                        width=1)
-        nm_tag = f"nm_{key}"
-        draw_round_rect(cv, x1 + 16, y1 + 10, x1 + 44, y1 + 36, 7,
+                        fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER), width=1)
+        draw_round_rect(cv, x1 + 16, y1 + 14, x1 + 44, y1 + 42, 7,
                         fill="#303B4D", outline="")
-        cv.create_text(x1 + 30, y1 + 23, text=device_badge(r.name),
-                       fill="#A8CAFF", font=self._f(11, True))
-        display_name = r.name or "设备"
-        name_font = tkfont.Font(font=self._f(12, True))
-        while name_font.measure(display_name) > 300 * self.S and len(display_name) > 1:
-            display_name = display_name[:-2] + "…"
-        cv.create_text(x1 + 54, y1 + 22, text=display_name, anchor="w",
-                       fill=_rgb(self.DSH_TEXT), font=self._f(12, True),
-                       tags=(nm_tag,))
+        cv.create_text(x1 + 30, y1 + 28, text=device_badge(r.name),
+                       fill="#A8CAFF", font=self._f(13, True))
+        nm_tag = f"nm_{key}"
+        name = self._fit_text(r.name or "设备", x2 - x1 - 196, 14, True)
+        cv.create_text(x1 + 54, y1 + 28, text=name, anchor="w",
+                       fill=_rgb(self.DSH_TEXT), font=self._f(14, True), tags=(nm_tag,))
         cv.tag_bind(nm_tag, "<Double-Button-1>",
-                    lambda e, k=key, x=(x1 + 54) * self.S, y=(y1 + 22) * self.S:
+                    lambda e, k=key, x=(x1 + 54) * self.S, y=(y1 + 28) * self.S:
                     self._edit_name(k, x, y))
-        stamp = time.strftime("%H:%M:%S", time.localtime(r.ts)) if r.ts else "--:--"
-        cv.create_text(x1 + 18, y1 + 70,
-                       text=f"{reading_status(r)} · 更新 {stamp}", anchor="w",
-                       fill=_rgb(self.DSH_MUTED), font=self._f(9))
-        unknown = (r.status == "unknown_proto")
+        level = r.level if r.ok else None
+        value = f"{level}%" if level is not None else ("待更新" if r.present else "未连接")
+        cv.create_text(x2 - 22, y1 + 28, text=value, anchor="e",
+                       fill=_rgb(self.DSH_TEXT if level is not None else self.DSH_SUB),
+                       font=self._f(32 if level is not None else 14, True), tags=(f"value_{key}",))
         meta = f"{r.vid:04X}:{r.pid:04X}" if r.vid else "----:----"
-        hid = (f"0x{r.usage_page:04X}"
-               if (r.hid_known and r.usage_page) else "未知")
-        line = f"{meta} · HID ({hid})"
-        if r.stale:
-            cv.create_text(x1 + 18, y1 + 46,
-                           text=r.detail or "上次更新", anchor="w",
-                           fill=_rgb(self.DSH_SUB), font=self._f(9))
-        elif r.status in ("asleep", "waiting"):
-            cv.create_text(x1 + 18, y1 + 46,
-                           text=r.detail or "设备休眠", anchor="w",
-                           fill=_rgb(self.DSH_SUB), font=self._f(9))
-        elif unknown:
-            text = f"{line}  协议未知，无法读取电量"
-            cv.create_text(x1 + 18, y1 + 46, text=text, anchor="w",
-                           fill=_rgb(self.DSH_SUB), font=self._f(9))
-            f9 = tkfont.Font(family=FONT, size=-int(round(9 * self.S)))
-            gap = f9.measure("汉") * 2 / self.S
-            bx = x1 + 18 + f9.measure(text) / self.S + gap
-            tag = f"fix_{key}"
-            cv.create_text(bx, y1 + 46, text="点我解决", anchor="w",
-                           fill=_rgb((90, 170, 240)), font=self._f(9, True),
-                           tags=(tag,))
-            wbtn = f9.measure("点我解决") / self.S
-            cv.create_line(bx, y1 + 51, bx + wbtn, y1 + 51,
-                           fill=_rgb((90, 170, 240)), width=1, tags=(tag,))
-            cv.tag_bind(tag, "<Button-1>",
-                        lambda e, k=key: self.open_help(k))
-            cv.tag_bind(tag, "<Enter>",
-                        lambda e: cv.configure(cursor="hand2"))
-            cv.tag_bind(tag, "<Leave>", lambda e: cv.configure(cursor=""))
-        else:
-            cv.create_text(x1 + 18, y1 + 46, text=line, anchor="w",
-                           fill=_rgb(self.DSH_SUB), font=self._f(9))
-        lv = r.level if r.ok else None
-        if r.ok and lv is not None:
-            cv.create_text(x2 - 44, y1 + 40, text=str(lv), anchor="e",
-                           fill=_rgb(self.DSH_TEXT), font=self._f(30, True))
-            cv.create_text(x2 - 24, y1 + 40, text="%", anchor="e",
-                           fill=_rgb(self.DSH_SUB), font=self._f(11))
-        elif r.status == "asleep":
-            cv.create_text(x2 - 24, y1 + 40, text="休眠", anchor="e",
-                           fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
-        elif r.status == "waiting":
-            cv.create_text(x2 - 24, y1 + 40, text="待更新", anchor="e",
-                           fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
-        elif not unknown:
-            cv.create_text(x2 - 24, y1 + 40, text="未连接", anchor="e",
-                           fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
-        bx1, bx2 = x1 + 18, x2 - 18
-        by = y2 - 24
-        draw_round_rect(cv, bx1, by, bx2, by + 6, 3,
+        hid = f"0x{r.usage_page:04X}" if r.hid_known and r.usage_page else "未知"
+        cv.create_text(x1 + 18, y1 + 58, text=f"{meta} · HID {hid}", anchor="w",
+                       fill=_rgb(self.DSH_SUB), font=self._f(11), tags=(f"meta_{key}",))
+        stamp = time.strftime("%H:%M:%S", time.localtime(r.ts)) if r.ts else "--:--"
+        status = f"{reading_status(r)} · {stamp}"
+        if r.status == "waiting":
+            status = "等待电量 · 唤醒设备并关闭厂家网页后刷新"
+        unknown = r.status == "unknown_proto"
+        status_width = x2 - x1 - (156 if unknown else 36)
+        cv.create_text(x1 + 18, y1 + 84,
+                       text=self._fit_text(status, status_width, 12), anchor="w",
+                       fill=_rgb(self.DSH_SUB), font=self._f(12), tags=(f"status_{key}",))
+        if unknown:
+            self._button(x2 - 116, y1 + 70, 98, 28, "协议帮助",
+                         lambda k=key: self.open_help(k))
+        bx1, bx2, by = x1 + 18, x2 - 18, y2 - 22
+        draw_round_rect(cv, bx1, by, bx2, by + 8, 4,
                         fill=_rgb(self.DSH_TRACK), outline="")
-        if lv is not None and lv > 0:
-            w = int((bx2 - bx1) * lv / 100)
-            draw_round_rect(cv, bx1, by, bx1 + max(6, w), by + 6, 3,
-                            fill=_rgb(self._level_rgb(lv)), outline="")
+        if level is not None and level > 0:
+            width = max(8, int((bx2 - bx1) * level / 100))
+            draw_round_rect(cv, bx1, by, bx1 + width, by + 8, 4,
+                            fill=_rgb(self._level_rgb(level)), outline="")
 
     def _empty_card(self, x1, y1, x2, y2):
         """没有任何 2.4G 接收器时的占位卡：只有提示和空电量槽?"""
@@ -4315,10 +4318,10 @@ class Panel:
                         fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER),
                         width=1)
         cv.create_text(x1 + 18, y1 + 22, text="请插入设备", anchor="w",
-                       fill=_rgb(self.DSH_TEXT), font=self._f(12, True))
+                       fill=_rgb(self.DSH_TEXT), font=self._f(14, True))
         cv.create_text(x1 + 18, y1 + 46,
                        text="或者拔插一下你想要添加的设备", anchor="w",
-                       fill=_rgb(self.DSH_SUB), font=self._f(9))
+                       fill=_rgb(self.DSH_SUB), font=self._f(11))
         bx1, bx2 = x1 + 18, x2 - 18
         by = y2 - 24
         draw_round_rect(cv, bx1, by, bx2, by + 6, 3,
@@ -4333,7 +4336,7 @@ class Panel:
         S = self.S
         bar_len = self.W - 84 * S
         limit_px = max(80, int(bar_len * 0.6))
-        font = tkfont.Font(family=FONT, size=-int(round(12 * S)),
+        font = tkfont.Font(family=FONT, size=-int(round(14 * S)),
                            weight="bold")
         cjk = max(1, font.measure("汉"))
         eng = max(1.0, font.measure("abcdefghij") / 10.0)
@@ -4345,7 +4348,7 @@ class Panel:
                      insertbackground="#F5F5F7", relief="flat", bd=0,
                      highlightthickness=1, highlightbackground="#3A3C41",
                      highlightcolor="#5A5D63",
-                     font=(FONT, -int(round(12 * S)), "bold"),
+                     font=(FONT, -int(round(14 * S)), "bold"),
                      justify="left", selectbackground="#3A3D44",
                      selectforeground="#F5F5F7")
         e.insert(0, current)
@@ -4450,7 +4453,7 @@ class Panel:
         return item
 
     def _button(self, x, y, w, h, text, cmd, kind="ghost"):
-        tag = f"btn_{text}_{x}"
+        tag = f"btn_{text}_{x}_{y}"
         if kind == "solid":
             fill, border, col = self.DSH_BTN, self.DSH_BTN, self.DSH_TEXT
             hover, hover_col = self.DSH_BTN_HOVER, self.DSH_TEXT
@@ -4466,7 +4469,7 @@ class Panel:
                                fill=_rgb(fill), outline=_rgb(border),
                                width=1, tags=(tag,))
         txt = self._ctext(x + w / 2, y + h / 2, text, _rgb(col),
-                          self._f(11 if kind == "close" else 9), tags=(tag,))
+                          self._f(13 if kind == "close" else 12), tags=(tag,))
         self._btns[tag] = (poly, fill, hover, txt, col, hover_col, False)
         self.cv.tag_bind(tag, "<Button-1>", lambda e: cmd())
         self.cv.tag_bind(tag, "<Enter>", lambda e: self._hover_dsh(tag, True))
@@ -4497,7 +4500,7 @@ class Panel:
         if checked:
             self.cv.create_line(x + 3, y + 1, x + 5.5, y + 3.5, x + 9.5, y - 3,
                                 fill=_rgb(self.DSH_TEXT), width=2, tags=(tag,))
-        self._ctext(x + 20, y, label, _rgb(self.DSH_SUB), self._f(9),
+        self._ctext(x + 20, y, label, _rgb(self.DSH_SUB), self._f(12),
                     tags=(tag,), anchor="w")
         self.cv.tag_bind(tag, "<Button-1>", lambda e: cmd())
 
@@ -4687,7 +4690,7 @@ class Tray:
         self.icons.clear()
         self.nids.clear()
         self.icon_keys.clear()
-        self.sync_icons()
+        self.refresh_icons()
 
     def sync_icons(self):
         """Keep one stable application entry, including the empty/offline states."""
@@ -4714,11 +4717,11 @@ class Tray:
 
     def _fill_icon(self, nid: NOTIFYICONDATAW, key: str):
         summary = summarize(self.app.snapshot())
-        lvl = summary.alert_level if summary.alert_level is not None else 100
-        k = (lvl, self.app.theme_light)
+        lvl = summary.level
+        k = (lvl, summary.charging, self.app.theme_light)
         old = self.icons.get(nid.uID)
         if self.icon_keys.get(nid.uID) != k or not old:
-            icon = make_battery_icon(lvl, self.app.theme_light, dashboard=True)
+            icon = make_battery_icon(lvl, self.app.theme_light, summary.charging)
             self.icons[nid.uID] = icon
             self.icon_keys[nid.uID] = k
             nid.hIcon = icon
@@ -4775,27 +4778,30 @@ class Tray:
 
     def refresh_icons(self):
         self.sync_icons()
+        notices = getattr(self.app, "_notifications", None)
+        if notices is None:
+            return
+        while True:
+            try:
+                text, title, warning = notices.get_nowait()
+            except queue.Empty:
+                break
+            if not self.notify(text, title, warning):
+                notices.put((text, title, warning))
+                break
 
-    def notify(self, text: str, title: str = "2.4G") -> bool:
-        """托盘气泡通知（Windows 通知丿也会收到），?64px 满绿玁图标?"""
+    def notify(self, text: str, title: str = "EZ2.4G Dashboard", warning=False) -> bool:
+        """Request a system notification without changing the current battery ring."""
         nid = self.nids.get(1)
         if nid is None:
             return False
-        if not self._big_icon:
-            self._big_icon = make_battery_icon(100, self.app.theme_light,
-                                               False, size=64)
-        old_icon = nid.hIcon
-        if self._big_icon:
-            nid.hIcon = self._big_icon
-        nid.uFlags = NIF_INFO | NIF_ICON
-        nid.uVersion = 10000          # 10 ?        nid.szInfo = text[:255]
+        nid.uFlags = NIF_INFO
+        nid.uVersion = 10000
+        nid.szInfo = text[:255]
         nid.szInfoTitle = title[:63]
-        nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON
-        nid.hBalloonIcon = self._big_icon
+        nid.dwInfoFlags = 0x0002 if warning else NIIF_INFO
         ok = shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
-        nid.hIcon = old_icon
-        nid.hBalloonIcon = 0
         return bool(ok)
 
     def destroy(self):
@@ -4876,6 +4882,8 @@ class TrayApp:
         self._actions = queue.Queue()
         self._tray_menu_open = False
         self._full: dict[str, bool] = {}
+        self._low_alerts = LowBatteryAlerts()
+        self._notifications = queue.Queue()
         self.devices = load_saved_devices()
         self._seen = None
         self._asked = set()
@@ -4908,6 +4916,7 @@ class TrayApp:
         with self._lock:
             self._readings = res
         self._check_full(res)
+        self._check_low(res)
         self._refreshing = False
         self._dirty = True
         if self.tray and self.tray.hwnd:
@@ -4921,13 +4930,13 @@ class TrayApp:
             if r.level >= 100:
                 if not self._full.get(key):
                     self._full[key] = True
-                    if self.tray:
-                        try:
-                            self.tray.notify(f"{r.name} 已经充满电啦")
-                        except Exception:
-                            pass
+                    self._notifications.put((f"{r.name} 已经充满电啦", "设备已充满", False))
             elif r.level < 97:
                 self._full[key] = False
+
+    def _check_low(self, res):
+        for key, text in self._low_alerts.update(res):
+            self._notifications.put((text, "设备电量不足 10%", True))
 
     # -- 交互 --------------------------------------------------------------
     def request_show(self):
