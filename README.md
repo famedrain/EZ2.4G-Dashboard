@@ -43,6 +43,8 @@ python my_devices.py --install   :: 主动创建自启项及桌面入口
 
 能否读取电量取决于设备协议，不能保证所有 2.4G 外设都可用。
 
+- 新增官方网页协议适配：迈从 G75 Pro 无线接收器 `3554:FA09`、雷柏 VT3S 无线接收器 `24AE:1411`。协议依据、帧结构和验证边界见 [适配记录](docs/protocols.md)。当前属于待实机验证的预览适配。
+- 已添加这两台设备时，升级后无需删除重加。关闭厂家网页驱动，唤醒设备后点击刷新。雷柏目前被动监听电量上报；未收到有效报告时显示“等待设备电量”，不会生成电量或假装休眠。
 - 标准 HID 电量可读时，自动保存标准协议。
 - 未知协议会明确显示“协议未知，无法读取电量”，可以点击卡片的“点我解决”进入上游抓包助手。
 - 抓包需安装 [USBPcap](https://desowin.org/usbpcap/)、重启，并允许抓包助手以管理员权限运行。正常查看面板不要求管理员权限。
@@ -54,7 +56,7 @@ python my_devices.py --install   :: 主动创建自启项及桌面入口
 
 ```bat
 python -m unittest discover -s tests -v
-python -m py_compile my_devices.py dashboard_state.py
+python -m py_compile my_devices.py dashboard_state.py vendor_battery.py
 python -m pip install pyinstaller==6.16.0
 python -m PyInstaller --clean --noconfirm --onefile --windowed --name EZ2.4G-Dashboard --icon app.ico my_devices.py
 ```

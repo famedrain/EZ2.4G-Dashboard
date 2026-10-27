@@ -24,11 +24,13 @@ def reading_status(reading) -> str:
     if not reading.present:
         return "未连接"
     if reading.stale:
-        return "设备休眠 · 上次电量"
+        return "上次电量 · 暂未更新"
     if reading.status == "unknown_proto":
         return "协议未知"
     if reading.status == "asleep":
         return "设备休眠"
+    if reading.status == "waiting":
+        return "等待设备电量"
     if reading.ok and reading.level is not None:
         return {"charging": "充电中", "full": "已充满", "wired": "有线模式"}.get(
             reading.status, "已连接")

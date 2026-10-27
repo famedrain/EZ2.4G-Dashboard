@@ -27,6 +27,7 @@ import threading
 import time
 from typing import Optional
 from dashboard_state import device_badge, flyout_position, reading_status, summarize
+from vendor_battery import protocol_name, read_battery as read_vendor_battery
 
 UI_SCALE = 1.0
 
@@ -1032,7 +1033,7 @@ def device_key(vid: int, pid: int) -> str:
 
 def has_device_protocol(vid: int, pid: int) -> bool:
     """只有保存过协议（标准 HID 或抓包）才算有协议。"""
-    return f"{vid:04X}:{pid:04X}" in user_protocols()
+    return bool(protocol_name(vid, pid) or f"{vid:04X}:{pid:04X}" in user_protocols())
 
 
 def save_standard_protocol(vid: int, pid: int) -> None:
@@ -1083,8 +1084,7 @@ def read_saved_device(dev: dict, ifaces=None) -> Reading:
     prod = next((d.product for d in cand if d.product), "")
     if not name:
         name = prod or f"{vid:04X}:{pid:04X}"
-    # 只允许两条路：标准 HID 直接读，或抓包保存的协议。
-    # 不再做厂商兼容试探，也不再按 VID/PID 匹配内置设备。
+    # Standard HID first, then saved capture, then narrowly pinned official protocols.
     r = None
     for d in cand:
         try:
@@ -1107,12 +1107,20 @@ def read_saved_device(dev: dict, ifaces=None) -> Reading:
     elif proto is None:
         # 标准 HID 能直接读：保存成协议，之后休眠也算“有协议”
         save_standard_protocol(vid, pid)
-    supported = key in user_protocols()
+    builtin = protocol_name(vid, pid)
+    if (not r or not r.ok) and builtin:
+        vendor = read_vendor_battery(cand, HidDevice)
+        if vendor is not None:
+            r = Reading(ok=True, level=vendor.level,
+                        status="charging" if vendor.charging else "discharging",
+                        source=vendor.source, raw=vendor.raw)
+    supported = bool(builtin or key in user_protocols())
     if r is None:
         r = Reading(
             ok=False, present=True, name=name,
-            status="asleep" if supported else "unknown_proto",
-            detail=("设备休眠" if supported
+            status="waiting" if builtin else ("asleep" if supported else "unknown_proto"),
+            detail=("已适配官方协议，暂未收到电量；请唤醒设备、关闭网页驱动后刷新" if builtin else
+                    "设备休眠" if supported
                     else "协议未知，无法读取电量"))
     elif not r.ok and supported:
         r.status = "asleep"
@@ -4249,7 +4257,7 @@ class Panel:
             cv.create_text(x1 + 18, y1 + 46,
                            text=r.detail or "上次更新", anchor="w",
                            fill=_rgb(self.DSH_SUB), font=self._f(9))
-        elif r.status == "asleep":
+        elif r.status in ("asleep", "waiting"):
             cv.create_text(x1 + 18, y1 + 46,
                            text=r.detail or "设备休眠", anchor="w",
                            fill=_rgb(self.DSH_SUB), font=self._f(9))
@@ -4283,6 +4291,9 @@ class Panel:
                            fill=_rgb(self.DSH_SUB), font=self._f(11))
         elif r.status == "asleep":
             cv.create_text(x2 - 24, y1 + 40, text="休眠", anchor="e",
+                           fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
+        elif r.status == "waiting":
+            cv.create_text(x2 - 24, y1 + 40, text="待更新", anchor="e",
                            fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
         elif not unknown:
             cv.create_text(x2 - 24, y1 + 40, text="未连接", anchor="e",
