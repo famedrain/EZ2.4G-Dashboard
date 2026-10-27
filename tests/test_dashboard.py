@@ -253,6 +253,22 @@ class WindowsTests(unittest.TestCase):
             self.assertFalse(m.startup_enabled())
             install.assert_not_called()
 
+    def test_five_minute_refresh_overrides_legacy_interval_and_manual_is_immediate(self):
+        m = self.appmod
+        with patch.object(m, "is_light_theme", return_value=False), \
+                patch.object(m, "load_config", return_value={"interval": 60}), \
+                patch.object(m, "load_saved_devices", return_value=[]):
+            app = m.TrayApp()
+        self.assertEqual(app.interval, 300)
+        with patch.object(m.threading, "Thread") as worker:
+            app.refresh()
+        worker.return_value.start.assert_called_once()
+        tray = m.Tray(app)
+        with patch.object(m.user32, "KillTimer"), \
+                patch.object(m.user32, "SetTimer") as timer:
+            tray._proc(123, m.WM_APP_INTERVAL, 0, 0)
+        timer.assert_called_once_with(123, 1, 300000, None)
+
     def test_outside_focus_hides_but_child_dialogs_keep_dashboard_open(self):
         m = self.appmod
         panel = object.__new__(m.Panel)

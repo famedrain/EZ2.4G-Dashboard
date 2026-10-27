@@ -31,6 +31,7 @@ from dashboard_state import (LowBatteryAlerts, clamp_position, device_badge,
 from vendor_battery import protocol_name, read_battery as read_vendor_battery
 
 UI_SCALE = 1.0
+AUTO_REFRESH_SECONDS = 5 * 60
 
 
 # ===========================================================================
@@ -4870,7 +4871,8 @@ class TrayApp:
     def __init__(self, panel_only: bool = False):
         self.panel_only = panel_only
         self.theme_light = is_light_theme()
-        self.interval = clamp_interval(load_config().get("interval", 60))
+        # Upgrade existing installations too; legacy interval=60 must not win.
+        self.interval = AUTO_REFRESH_SECONDS
         self._readings: dict[str, Reading] = {}
         self._lock = threading.Lock()
         self._refreshing = False
