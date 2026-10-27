@@ -1,4 +1,4 @@
-"""Source-derived synthetic reports, NOT recordings from the user's devices."""
+"""Synthetic protocol tests plus one explicitly marked real G75 Pro reply."""
 import sys
 import unittest
 from types import SimpleNamespace
@@ -31,8 +31,32 @@ class VendorProtocolTests(unittest.TestCase):
     def test_mchose_decodes_zero_full_and_charging(self):
         for level in (0, 72, 100):
             self.assertEqual(parse_mchose(mchose_report(level)).level, level)
-        self.assertTrue(parse_mchose(mchose_report(flags=1)).charging)
-        self.assertFalse(parse_mchose(mchose_report(flags=0x10)).charging)
+        self.assertTrue(parse_mchose(mchose_report(flags=0x10)).charging)
+        self.assertFalse(parse_mchose(mchose_report(flags=1)).charging)
+
+    def test_g75_actual_reply_full_battery_is_not_charging(self):
+        # Received from the user's FF02 configuration collection on 2026-10-27.
+        frame = bytes.fromhex("13 4a 01 00 02 64 01 00 00 00 00 00 00 00 00 00 00 00 00 c5")
+        result = parse_mchose(frame)
+        self.assertEqual(result.level, 100)
+        self.assertFalse(result.charging)
+
+    def test_mchose_retries_one_missed_query_within_total_budget(self):
+        clock = [0.0]
+        dev = Mock()
+        dev.write_output.return_value = 20
+
+        def receive(*args):
+            clock[0] += 1.0
+            return mchose_report() if dev.write_output.call_count == 2 else None
+
+        dev.read_input.side_effect = receive
+        with patch("vendor_battery.time.monotonic", side_effect=lambda: clock[0]):
+            result = read_battery([iface(MCHOSE_RECEIVER, 0xFF02)], Mock(return_value=dev))
+        self.assertEqual(result.level, 72)
+        self.assertEqual(dev.write_output.call_count, 2)
+        self.assertLessEqual(clock[0], 4.0)
+        dev.close.assert_called_once()
 
     def test_mchose_rejects_wrong_command_sequence_length_and_percent(self):
         valid = mchose_report()

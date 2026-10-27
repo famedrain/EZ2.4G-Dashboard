@@ -1112,7 +1112,8 @@ def read_saved_device(dev: dict, ifaces=None) -> Reading:
         vendor = read_vendor_battery(cand, HidDevice)
         if vendor is not None:
             r = Reading(ok=True, level=vendor.level,
-                        status="charging" if vendor.charging else "discharging",
+                        status=("charging" if vendor.charging else
+                                "full" if vendor.level == 100 else "discharging"),
                         source=vendor.source, raw=vendor.raw)
     supported = bool(builtin or key in user_protocols())
     if r is None:

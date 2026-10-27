@@ -44,7 +44,9 @@ def parse_mchose(report):
     level, flags = report[5], report[6]
     if level > 100 or flags >> 4 > 1 or flags & 0x0F > 1:
         return None
-    return Battery(level, bool(flags & 0x0F), "迈从 G75 Pro 官方协议", bytes(report))
+    # Official binary-parser uses endianness("little"): first bit4 fullStatus
+    # occupies the LOW nibble; the following chargeStatus is the HIGH nibble.
+    return Battery(level, bool(flags >> 4), "迈从 G75 Pro 官方协议", bytes(report))
 
 
 def parse_rapoo(report):
@@ -84,18 +86,25 @@ def read_battery(ifaces, device_factory, timeout=4.0):
         dev = None
         try:
             dev = device_factory(iface.path, write=write)
-            if write:
-                request = mchose_request()
-                request += bytes(iface.output_len - len(request))
-                if dev.write_output(request) != len(request):
-                    continue
-            while time.monotonic() < deadline:
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-                report = dev.read_input(iface.input_len, min(250, remaining_ms))
-                if report:
-                    result = parser(report)
-                    if result is not None:
-                        return result
+            # A sleeping receiver may miss the first query. Retry the identical
+            # read command once within the existing total time budget.
+            for attempt in range(2 if write else 1):
+                if time.monotonic() >= deadline:
+                    break
+                attempt_deadline = (min(deadline, time.monotonic() + timeout / 2)
+                                    if write and attempt == 0 else deadline)
+                if write:
+                    request = mchose_request()
+                    request += bytes(iface.output_len - len(request))
+                    if dev.write_output(request) != len(request):
+                        break
+                while time.monotonic() < attempt_deadline:
+                    remaining_ms = max(1, int((attempt_deadline - time.monotonic()) * 1000))
+                    report = dev.read_input(iface.input_len, min(250, remaining_ms))
+                    if report:
+                        result = parser(report)
+                        if result is not None:
+                            return result
         except Exception:
             # Driver ownership, sleeping hardware, and HID access errors all
             # remain "waiting" at the UI layer rather than fake percentages.
