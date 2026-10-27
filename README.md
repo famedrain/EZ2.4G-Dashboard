@@ -1,113 +1,73 @@
-# 2.4G 外设电量
+# EZ2.4G Dashboard
 
-Windows 10/11 的 2.4G 无线外设电量托盘工具。
+Windows 10/11 x64 的 2.4G 无线外设电量工具：**一个托盘图标，点击查看所有设备的 Dashboard**。
 
-纯 Python 标准库（`ctypes` + `tkinter`），**零第三方依赖**，不写日志。
+基于 [Ap0LoG1zE/EZ2.4G](https://github.com/Ap0LoG1zE/EZ2.4G) 的公开 Fork，保留上游设备读取与抓包适配能力。运行时使用 Python 标准库（ctypes + tkinter），无需第三方 Python 包。
 
-> **甚至只需要网页版驱动就可以拿到电量协议**——不少 2.4G 外设的网页版驱动直接用 WebHID 查询电量，翻一眼协议比装 USBPcap 抓包省事得多。
+## 使用
 
-![面板](docs/panel.png)
+1. 从本仓库 [Releases](https://github.com/famedrain/EZ2.4G-Dashboard/releases) 下载 `EZ2.4G-Dashboard.exe` 并运行；不需要 Python。开发版构建可在 [Actions](https://github.com/famedrain/EZ2.4G-Dashboard/actions) 的 Windows build 中下载。
+2. 程序静默驻留托盘。即使没有设备，也保留一个图标；Windows 可能将它放进托盘折叠菜单。
+3. 拔插需要添加的 USB 接收器，在确认弹窗里选择添加。启动时不会自动添加所有 HID 设备。
+4. 左键单击托盘图标打开 Dashboard，再次点击可收起。面板在托盘附近展开，按 Esc、关闭按钮或点击其他应用可收起；编辑和抓包子窗口交互时保留面板。
+5. 右键托盘图标可以打开 Dashboard、立即刷新、切换开机自启或退出。
 
-托盘里每台设备一个电量圆环：
+面板显示设备名称、类别标识、电量、充电/休眠/未连接状态及时间，可滚动查看多台设备。双击设备名称重命名，右键卡片删除。类别按名称推断；不确定时显示通用标识，可在重命名时加入“鼠标”“键盘”“耳机”等词。
 
-![托盘](docs/tray.png)
+正常时托盘显示蓝色应用图标。设备实时电量不高于 20% 时，外圈改为最低电量的提示；充电、休眠历史值和断开设备不会触发此提示。悬停显示各设备电量摘要，超出 Windows 提示长度时截断；完整列表在 Dashboard 中查看。
 
-## 下载
+## 开机自启
 
-两种方式任选：
+**可选，默认不创建。** 在 Dashboard 或托盘右键菜单中勾选“开机自启”即可，启动后不弹出面板。取消勾选可关闭。程序退出后停止查询电量。
 
-- **免安装（推荐）**：到 [Releases](https://github.com/Ap0LoG1zE/EZ2.4G/releases) 下载 `2.4G.exe`，双击运行，无需 Python。
-- **最小体积**：下载 `my_devices.py`（约 185 KB），安装 Python 3.10+ 后运行：
+- 自启项：当前用户启动目录中的 `EZ2.4G Dashboard.lnk`。
+- 配置：`%APPDATA%\BatteryTrayDashboard\config.json`。
+- 与原版的配置、自启项和单实例标识分开。初次使用需重新添加设备；如需沿用原版协议，可在两边都退出后，手动复制原版 `%APPDATA%\BatteryTray\config.json` 到上述新目录。
+- 不建议同时运行两个版本查询同一个接收器。
 
-```bat
-python my_devices.py
-```
+## 从源码运行
 
-> exe 未签名，Windows 可能提示 SmartScreen，选择“更多信息 → 仍要运行”。
-
-## 功能
-
-- 托盘常驻，左键刷新，右键打开面板
-- 启动不自动添加设备；无设备时显示「请插入设备 / 或者拔插一下你想要添加的设备」
-- 新设备插入或重新拔插时弹窗确认，显示设备名、VID:PID 和当前电量
-- 双击卡片上的设备名即可重命名，名称保存在配置里
-- 右键设备卡片可删除该设备，同时清除它的抓包协议和上次电量
-- 深色圆角面板、电量卡片、滚动列表、托盘电量图标
-- 自动刷新、开机自启（启动项名 `2.4G`）
-- 只读查询，不修改设备设置
-
-## 协议规则
-
-软件**不内置设备协议表**，也不会按 VID:PID 自动匹配内置设备。
-
-只有两种来源算“有协议”：
-
-1. **标准 HID 电量能直接读到**：自动保存为 `{"kind": "standard"}`；
-2. **抓包成功**：保存 `{"kind": "captured", "requests": [...], "offset": N}`。
-
-设备休眠或未开机时：
-
-- 有协议、也有上次电量：显示上次电量，副标题「上次更新 HH:MM · 设备休眠」；
-- 有协议、但没有上次电量：显示「设备休眠」；
-- 没有协议：显示「协议未知，无法读取电量」，不会假装休眠。
-
-## 环境
-
-- Windows 10/11 x64
-- Python 3.10+（需包含 tkinter）
-- 抓包需要 [USBPcap](https://desowin.org/usbpcap/) 和管理员权限
-
-## 运行
+安装 Windows x64 Python 3.10+，需包含 tkinter。下载整个源码目录，保持 `my_devices.py` 与 `dashboard_state.py` 在同一目录：
 
 ```bat
-python my_devices.py            :: 托盘常驻
-python my_devices.py --once     :: 读一次并打印
-python my_devices.py --list     :: 列出 HID 接口
-python my_devices.py --panel    :: 只开面板，不常驻托盘
-python my_devices.py --install  :: 创建开机自启 + 桌面入口
+python my_devices.py             :: 静默驻留单图标托盘
+python my_devices.py --panel     :: 只打开 Dashboard，关闭即退出
+python my_devices.py --once      :: 读取一次并打印
+python my_devices.py --list      :: 列出 HID 接口
+python my_devices.py --install   :: 主动创建自启项及桌面入口
 ```
 
-配置文件：`%APPDATA%\BatteryTray\config.json`
+也可以双击 `启动.bat`，通过系统 Python Launcher 或 PATH 中的 pythonw 启动。脚本不再依赖原作者电脑上的固定 Python 路径。
 
-里面保存：
+## 设备协议与抓包
 
-- `devices`：已添加的设备（VID、PID、名称）
-- `protocols`：标准 HID 或抓包保存的协议
-- `last`：每台设备上次成功读到的电量
-- `interval`：刷新间隔
-- `usbpcap`：USBPcapCMD 路径
+能否读取电量取决于设备协议，不能保证所有 2.4G 外设都可用。
 
-## 未知设备抓包
+- 标准 HID 电量可读时，自动保存标准协议。
+- 未知协议会明确显示“协议未知，无法读取电量”，可以点击卡片的“点我解决”进入上游抓包助手。
+- 抓包需安装 [USBPcap](https://desowin.org/usbpcap/)、重启，并允许抓包助手以管理员权限运行。正常查看面板不要求管理员权限。
+- 抓包前先关闭厂家驱动；开始抓包后打开厂家驱动，让它显示一次电量，再停止并填写实际百分比。
+- 多个字节符合时，换一个相差较大的电量再抓一次。保存后回读验证；无法验证的协议会被移除。
+- 加密、私有握手和特殊复合接收器仍可能无法适配。电量精度受设备上报限制。
 
-1. 安装 USBPcap，重启电脑
-2. 插拔一次要抓包的设备，在弹窗里点「添加」
-3. **关闭厂家驱动**，点「开始抓包」并允许管理员权限
-4. 打开厂家驱动，让它显示一次电量，记下数值
-5. 点「停止」，填入刚才的电量
-6. 只有一个字节符合：保存请求帧和电量字节位置
-7. 多个字节符合：换一个不同电量再抓一次，对比两次字节差值
-8. 保存后立即回读验证：
-   - 主动回读失败时，会尝试被动监听输入报告；
-   - 仍然失败会删除刚保存的协议，并提示「抓包中不含电量数据，可能是没按要求让厂商软件发电量请求」
+## 验证与构建
 
-提示：
+```bat
+python -m unittest discover -s tests -v
+python -m py_compile my_devices.py dashboard_state.py
+python -m pip install pyinstaller==6.16.0
+python -m PyInstaller --clean --noconfirm --onefile --windowed --name EZ2.4G-Dashboard --icon app.ico my_devices.py
+```
 
-- 没有匹配：注意抓包期间厂家驱动必须显示过电量；
-- 匹配不准确：换一个相差 10% 以上的电量再抓；
-- 多次没有结果：可能是厂家协议加密，无法通过抓包获取。
+构建产物位于 `dist/EZ2.4G-Dashboard.exe`。PyInstaller 仅用于打包，不是运行时依赖。Windows CI 会运行上述测试、构建 EXE 并上传构建附件；`v*` 标签构建成功后上传到本仓库 Releases。
 
-抓包分析会排除描述符、EP0 标准控制 setup、字符串描述符和全零报告；HID Feature Report 和厂商自定义报告会保留。
+测试覆盖单图标增改与重建、空设备/多设备、低电量与历史值处理、UTF-16 提示长度、浮层边界、菜单动作、原生图标绘制和隐藏 Tk 画布绘制。测试不会轮询真实外设、读取桌面或修改自启项。
 
-## 限制
+尚需实机手动验收：真实鼠标/键盘/耳机的电量与抓包协议、托盘点击与外部点击收起、多显示器与混合 DPI、系统注销后自启、打包 EXE 的交互表现。隐藏画布测试不等同于完整视觉验收。
 
-- 电量由设备上报，可能是 5% 步进
-- 加密或私有握手协议无法通过抓包读取
-- 仅支持 Windows 10/11 x64
+## 已知边界与来源
 
-## 文件
-
-- `my_devices.py`：主程序（抓包助手已内置）
-- `app.ico`：图标
-- `启动.bat`：启动脚本
-- `docs/panel.png`：界面截图
-- `docs/tray.png`：托盘截图
+- 设备身份沿用上游 VID + PID，两个相同型号接收器可能合并；此次修改未扩展为按序列号识别。
+- Windows 托盘提示长度有限，设备很多时需打开 Dashboard 查看。
+- `docs/panel.png`、`docs/tray.png` 是保留的上游历史截图，不代表本 Fork 当前界面。
+- 上游当前未提供 LICENSE 文件。本 Fork 保留原 Git 历史和作者归属，不另行授予上游代码的使用、分发或商业授权。

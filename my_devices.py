@@ -26,6 +26,7 @@ import random
 import threading
 import time
 from typing import Optional
+from dashboard_state import device_badge, flyout_position, reading_status, summarize
 
 UI_SCALE = 1.0
 
@@ -1417,7 +1418,8 @@ def _ring_pen(rgb, width: int) -> int:
 
 
 def make_battery_icon(level: Optional[int], light: bool,
-                      charging: bool = False, size: int = 32) -> int:
+                      charging: bool = False, size: int = 32,
+                      dashboard: bool = False) -> int:
     """size×size 的电量圆环图标，4 倍超采样后缩小，边缘更圆。"""
     SS = 4
     big = size * SS
@@ -1436,6 +1438,8 @@ def make_battery_icon(level: Optional[int], light: bool,
     hbm_big = gdi32.CreateDIBSection(memdc, ctypes.byref(bmi), 0,
                                      ctypes.byref(bits), None, 0)
     old = gdi32.SelectObject(memdc, hbm_big)
+    pen_track = 0
+    old_pen = 0
     try:
         key = COLORREF(255, 0, 255)
         bg = gdi32.CreateSolidBrush(key)
@@ -1450,7 +1454,7 @@ def make_battery_icon(level: Optional[int], light: bool,
         thick = max(2, int(round(4 * s)))
         track = (95, 98, 105) if not light else (175, 180, 188)
         pen_track = _ring_pen(track, thick)
-        gdi32.SelectObject(memdc, pen_track)
+        old_pen = gdi32.SelectObject(memdc, pen_track)
         null_brush = gdi32.GetStockObject(5)  # NULL_BRUSH
         gdi32.SelectObject(memdc, null_brush)
         gdi32.Ellipse(memdc, int(cx - radius), int(cy - radius),
@@ -1460,6 +1464,8 @@ def make_battery_icon(level: Optional[int], light: bool,
                 r, g, b = 34, 197, 94          # 充电：弧线绿色
             else:
                 r, g, b = _level_color(level)
+            if dashboard and level == 100:
+                r, g, b = 80, 160, 255
             pen_arc = _ring_pen((r, g, b), thick)
             gdi32.SelectObject(memdc, pen_arc)
             if level >= 100:
@@ -1473,8 +1479,19 @@ def make_battery_icon(level: Optional[int], light: bool,
                 gdi32.Arc(memdc, int(cx - radius), int(cy - radius),
                           int(cx + radius), int(cy + radius),
                           int(round(ex)), int(round(ey)), int(cx), int(cy - radius))
+            gdi32.SelectObject(memdc, pen_track)
             gdi32.DeleteObject(pen_arc)
 
+        if dashboard:
+            # Four tiles remain legible at 16px; the outer ring carries alerts.
+            brush = gdi32.CreateSolidBrush(COLORREF(
+                *( (35, 45, 60) if light else (235, 240, 250) )))
+            for dx in (11, 17):
+                for dy in (11, 17):
+                    tile = wt.RECT(int(dx * s), int(dy * s),
+                                   int((dx + 4) * s), int((dy + 4) * s))
+                    user32.FillRect(memdc, ctypes.byref(tile), brush)
+            gdi32.DeleteObject(brush)
         gdi32.SelectObject(memdc, old)
         gdi32.GdiFlush()
         raw = ctypes.string_at(bits, big * big * 4)
@@ -1524,6 +1541,11 @@ def make_battery_icon(level: Optional[int], light: bool,
         gdi32.DeleteObject(mask)
         return icon
     finally:
+        gdi32.SelectObject(memdc, old)
+        if old_pen:
+            gdi32.SelectObject(memdc, old_pen)
+        if pen_track:
+            gdi32.DeleteObject(pen_track)
         if hbm_small:
             gdi32.DeleteObject(hbm_small)
         gdi32.DeleteObject(hbm_big)
@@ -1547,7 +1569,7 @@ def startup_dir() -> str:
 
 
 def startup_lnk() -> str:
-    return os.path.join(startup_dir(), "2.4G.lnk")
+    return os.path.join(startup_dir(), "EZ2.4G Dashboard.lnk")
 
 
 def legacy_startup_lnk() -> str:
@@ -1555,8 +1577,7 @@ def legacy_startup_lnk() -> str:
 
 
 def startup_enabled() -> bool:
-    return (os.path.isfile(startup_lnk())
-            or os.path.isfile(legacy_startup_lnk()))
+    return os.path.isfile(startup_lnk())
 
 
 def project_dir() -> str:
@@ -1639,16 +1660,11 @@ def install_startup() -> bool:
     else:
         create_shortcut(path, pythonw_path(), f'"{script_path()}"',
                         project_dir(), "2.4G", pythonw_path())
-    if os.path.isfile(path):
-        try:
-            os.remove(legacy_startup_lnk())
-        except FileNotFoundError:
-            pass
     return os.path.isfile(path)
 
 
 def remove_startup() -> None:
-    for p in (startup_lnk(), legacy_startup_lnk()):
+    for p in (startup_lnk(),):
         try:
             os.remove(p)
         except FileNotFoundError:
@@ -1707,34 +1723,22 @@ def _create_file_link(link: str, target: str) -> bool:
 
 
 def install_desktop_links() -> list[str]:
-    created = []
-    desk = desktop_dir()
+    lnk = os.path.join(desktop_dir(), "EZ2.4G Dashboard.lnk")
+    if os.path.exists(lnk):
+        return []
     if getattr(sys, "frozen", False):
-        lnk = os.path.join(desk, "外设电量.lnk")
-        if not os.path.exists(lnk):
-            try:
-                create_shortcut(lnk, script_path(), "", project_dir(),
-                                "外设电量", script_path())
-                created.append(lnk)
-            except Exception:
-                pass
-        return created
-    dlink = os.path.join(desk, "外设电量")
-    flink = os.path.join(desk, "my_devices.py")
-    if not os.path.exists(dlink):
-        if _create_dir_link(dlink, project_dir()):
-            created.append(dlink)
-    if not os.path.exists(flink):
-        if _create_file_link(flink, script_path()):
-            created.append(flink if os.path.exists(flink) else flink + ".lnk")
-    return created
+        target, args = script_path(), ""
+    else:
+        target, args = pythonw_path(), f'"{script_path()}"'
+    create_shortcut(lnk, target, args, project_dir(), "EZ2.4G Dashboard", target)
+    return [lnk] if os.path.isfile(lnk) else []
 
 
 # ===========================================================================
 # 配置（只存刷新间隔；不是日志?# ===========================================================================
 def config_dir() -> str:
     base = os.environ.get("APPDATA") or project_dir()
-    return os.path.join(base, "BatteryTray")
+    return os.path.join(base, "BatteryTrayDashboard")
 
 
 def config_file() -> str:
@@ -3599,7 +3603,8 @@ class Panel:
         self.W = int(self.LW * self.S)
         self.H = int(self.LH * self.S)
         self.root = tk.Tk()
-        self.root.title("2.4G")
+        self.root.withdraw()
+        self.root.title("EZ2.4G Dashboard")
         self.root.overrideredirect(True)
         self.root.configure(bg="#0B1322")
         self.light = app.theme_light
@@ -3611,6 +3616,8 @@ class Panel:
         self.cv.bind("<ButtonRelease-1>", self._on_release)
         self.root.bind_all("<Button-1>", self._maybe_commit, add="+")
         self.root.bind("<Escape>", lambda e: self.hide())
+        self.root.bind("<FocusOut>", self._on_focus_out, add="+")
+        self._last_hidden = 0.0
         self._drag = None
         self._entry = None
         self._entry_key = None
@@ -3712,17 +3719,32 @@ class Panel:
     def _on_release(self, e):
         self._drag = None
 
+    def _on_focus_out(self, event):
+        self.root.after(180, self._dismiss_if_unfocused)
+
+    def _dismiss_if_unfocused(self):
+        if (not self._visible or self.app.panel_only or self._help_win
+                or self._menu or self.app._add_win or self.app._tray_menu_open):
+            return
+        if self.root.focus_displayof() is None:
+            self.hide()
+
     def show(self):
         self._visible = True
         self.light = self.app.theme_light
+        self._startup_var = startup_enabled()
         self.render()
         self.root.deiconify()
+        if self.app.tray:
+            self.root.update_idletasks()
+            self.app.tray.position_dashboard(self)
         try:
             # 叽顶不抢焦点：避免输入法条弹在面板上方
             self.root.attributes("-topmost", True)
         except Exception:
             pass
         self.root.lift()
+        self.root.focus_force()
         if self._shadow:
             try:
                 self.root.update_idletasks()
@@ -3741,12 +3763,13 @@ class Panel:
 
     def hide(self):
         self._visible = False
+        self._last_hidden = time.monotonic()
         self._close_help()
         try:
             self.root.attributes("-topmost", False)
         except Exception:
             pass
-        if getattr(self.app, "panel_only", False):
+        if getattr(self.app, "panel_only", False) and not self.app._stop:
             self.app.quit()
             return
         if self._shadow:
@@ -4076,6 +4099,7 @@ class Panel:
 
         snap = self.app.snapshot()
         keys = list(snap.keys())
+        summary = summarize(snap)
         self._card_rects = {}
         content = (len(keys) * 134 - 12) if keys else 122
         self._max_scroll = max(0.0, content - 256.0)
@@ -4092,13 +4116,18 @@ class Panel:
         cv.create_rectangle(0, 0, W, 87, fill=_rgb(self.DSH_BG), outline="")
         cv.create_rectangle(0, 345, W, H, fill=_rgb(self.DSH_BG), outline="")
 
-        cv.create_text(30, 34, text="外设电量", anchor="w",
+        cv.create_text(30, 30, text="设备 Dashboard", anchor="w",
                        fill=_rgb(self.DSH_TEXT), font=self._f(16, True))
         iv = self.app.interval
         iv_text = (f"每 {iv // 60} 分钟自动刷新" if iv % 60 == 0
                    else f"每 {iv} 秒自动刷新")
-        cv.create_text(30, 56, text="2.4G 无线外设 · " + iv_text, anchor="w",
+        counts = f"{summary.total} 台设备 · {summary.connected} 台连接"
+        if summary.low:
+            counts += f" · {summary.low} 台低电量"
+        cv.create_text(30, 56, text=counts + " · " + iv_text, anchor="w",
                        fill=_rgb(self.DSH_SUB), font=self._f(9))
+        self._button(W - 136, 20, 76, 28, "刷新", self.app.refresh)
+        self._button(W - 48, 20, 28, 28, "×", self.hide, kind="ghost")
         self._scrollbar()
 
         upd = self._ctext(24, 372, self._updated_text(), _rgb(self.DSH_MUTED),
@@ -4193,12 +4222,24 @@ class Panel:
                         fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER),
                         width=1)
         nm_tag = f"nm_{key}"
-        cv.create_text(x1 + 18, y1 + 22, text=r.name or "设备", anchor="w",
+        draw_round_rect(cv, x1 + 16, y1 + 10, x1 + 44, y1 + 36, 7,
+                        fill="#303B4D", outline="")
+        cv.create_text(x1 + 30, y1 + 23, text=device_badge(r.name),
+                       fill="#A8CAFF", font=self._f(11, True))
+        display_name = r.name or "设备"
+        name_font = tkfont.Font(font=self._f(12, True))
+        while name_font.measure(display_name) > 300 * self.S and len(display_name) > 1:
+            display_name = display_name[:-2] + "…"
+        cv.create_text(x1 + 54, y1 + 22, text=display_name, anchor="w",
                        fill=_rgb(self.DSH_TEXT), font=self._f(12, True),
                        tags=(nm_tag,))
         cv.tag_bind(nm_tag, "<Double-Button-1>",
-                    lambda e, k=key, x=(x1 + 18) * self.S, y=(y1 + 22) * self.S:
+                    lambda e, k=key, x=(x1 + 54) * self.S, y=(y1 + 22) * self.S:
                     self._edit_name(k, x, y))
+        stamp = time.strftime("%H:%M:%S", time.localtime(r.ts)) if r.ts else "--:--"
+        cv.create_text(x1 + 18, y1 + 70,
+                       text=f"{reading_status(r)} · 更新 {stamp}", anchor="w",
+                       fill=_rgb(self.DSH_MUTED), font=self._f(9))
         unknown = (r.status == "unknown_proto")
         meta = f"{r.vid:04X}:{r.pid:04X}" if r.vid else "----:----"
         hid = (f"0x{r.usage_page:04X}"
@@ -4455,6 +4496,8 @@ class Panel:
                 self._startup_var = False
             else:
                 self._startup_var = install_startup()
+                if not self._startup_var:
+                    raise OSError("无法创建开机自启快捷方式")
             self.render()
         except Exception as e:
             messagebox.showerror("开机自启?", f"设置失败：{e}")
@@ -4542,8 +4585,42 @@ user32.SetForegroundWindow.argtypes = [wt.HWND]
 user32.SetForegroundWindow.restype = wt.BOOL
 
 
+class NOTIFYICONIDENTIFIER(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND),
+                ("uID", wt.UINT), ("guidItem", GUID)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(NOTIFYICONIDENTIFIER),
+                                          ctypes.POINTER(wt.RECT)]
+shell32.Shell_NotifyIconGetRect.restype = ctypes.c_long
+user32.MonitorFromRect.argtypes = [ctypes.POINTER(wt.RECT), wt.DWORD]
+user32.MonitorFromRect.restype = wt.HANDLE
+user32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wt.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+user32.GetCursorPos.restype = wt.BOOL
+user32.GetParent.argtypes = [wt.HWND]
+user32.GetParent.restype = wt.HWND
+user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.SetWindowPos.restype = wt.BOOL
+user32.CreatePopupMenu.restype = wt.HMENU
+user32.AppendMenuW.argtypes = [wt.HMENU, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+user32.AppendMenuW.restype = wt.BOOL
+user32.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, wt.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.restype = wt.UINT
+user32.DestroyMenu.argtypes = [wt.HMENU]
+user32.DestroyMenu.restype = wt.BOOL
+
+
 class Tray:
-    CLASS_NAME = "BatteryTrayWndDSH"
+    CLASS_NAME = "BatteryTrayDashboardWnd"
 
     def __init__(self, app: "TrayApp"):
         self.app = app
@@ -4593,21 +4670,16 @@ class Tray:
         self.app._stop = True
 
     def _add_icons(self):
+        for icon in self.icons.values():
+            user32.DestroyIcon(icon)
         self.icons.clear()
         self.nids.clear()
         self.icon_keys.clear()
         self.sync_icons()
 
     def sync_icons(self):
-        """按实际插入的接收器减托盘图标；七没有时清空托盘?"""
-        snap = self.app.snapshot()
-        known = [k for k in ("mouse", "headset")
-                 if snap.get(k) and snap[k].present]
-        extras = [k for k, r in snap.items()
-                  if k not in ("mouse", "headset") and r and r.present
-                  and r.ok and r.level is not None]
-        present = known + extras
-        desired = {i + 1: k for i, k in enumerate(present[:4])}
+        """Keep one stable application entry, including the empty/offline states."""
+        desired = {1: "dashboard"}
         for uid in list(self.nids):
             if uid not in desired:
                 shell32.Shell_NotifyIconW(NIM_DELETE,
@@ -4629,13 +4701,12 @@ class Tray:
                 self.nids[uid] = nid
 
     def _fill_icon(self, nid: NOTIFYICONDATAW, key: str):
-        r = self.app.snapshot().get(key)
-        lvl = r.level if (r and r.ok) else None
-        charging = bool(r and r.status == "charging")
-        k = (lvl is None, lvl, charging, self.app.theme_light)
+        summary = summarize(self.app.snapshot())
+        lvl = summary.alert_level if summary.alert_level is not None else 100
+        k = (lvl, self.app.theme_light)
         old = self.icons.get(nid.uID)
         if self.icon_keys.get(nid.uID) != k or not old:
-            icon = make_battery_icon(lvl, self.app.theme_light, charging)
+            icon = make_battery_icon(lvl, self.app.theme_light, dashboard=True)
             self.icons[nid.uID] = icon
             self.icon_keys[nid.uID] = k
             nid.hIcon = icon
@@ -4643,12 +4714,52 @@ class Tray:
                 user32.DestroyIcon(old)
         else:
             nid.hIcon = old
-        name = (r.name if r and r.name else
-                (DEVICES[0].name if key == "mouse" else DEVICES[1].name))
-        stamp = time.strftime("%H:%M", time.localtime(r.ts)) if r else "--:--"
-        tip = (f"2.4G · {name}：{r.level}%（{stamp}）" if (r and r.ok)
-               else f"2.4G · {name}：未连接（{stamp}）")
-        nid.szTip = tip[:127]
+        nid.szTip = summary.tooltip
+
+    def position_dashboard(self, panel):
+        ident = NOTIFYICONIDENTIFIER()
+        ident.cbSize = ctypes.sizeof(ident)
+        ident.hWnd, ident.uID = self.hwnd, 1
+        rect = wt.RECT()
+        if shell32.Shell_NotifyIconGetRect(ctypes.byref(ident), ctypes.byref(rect)) != 0:
+            point = wt.POINT()
+            if not user32.GetCursorPos(ctypes.byref(point)):
+                return
+            rect = wt.RECT(point.x, point.y, point.x + 1, point.y + 1)
+        monitor = user32.MonitorFromRect(ctypes.byref(rect), 2)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return
+        work = info.rcWork
+        x, y = flyout_position(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (work.left, work.top, work.right, work.bottom), (panel.W, panel.H))
+        hwnd = user32.GetParent(panel.hwnd) or panel.hwnd
+        user32.SetWindowPos(hwnd, None, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
+
+    def context_menu(self):
+        menu = user32.CreatePopupMenu()
+        if not menu:
+            return
+        self.app._tray_menu_open = True
+        try:
+            for uid, label in ((1, "打开 Dashboard"), (2, "立即刷新"),
+                               (3, "开机自启"), (4, "退出")):
+                flags = 0x0008 if uid == 3 and startup_enabled() else 0
+                user32.AppendMenuW(menu, flags, uid, label)
+            point = wt.POINT()
+            user32.GetCursorPos(ctypes.byref(point))
+            user32.SetForegroundWindow(self.hwnd)
+            command = user32.TrackPopupMenu(menu, 0x0100 | 0x0002,
+                                            point.x, point.y, 0, self.hwnd, None)
+            user32.PostMessageW(self.hwnd, 0, 0, 0)
+            action = {1: "show", 2: "refresh", 3: "startup", 4: "quit"}.get(command)
+            if action:
+                self.app._actions.put((action, time.monotonic()))
+        finally:
+            user32.DestroyMenu(menu)
+            self.app._tray_menu_open = False
 
     def refresh_icons(self):
         self.sync_icons()
@@ -4690,9 +4801,9 @@ class Tray:
         if msg == WM_TRAYICON:
             cmd = lparam & 0xFFFF
             if cmd == WM_RBUTTONUP:
-                self.app.request_show()
+                self.context_menu()
             elif cmd == WM_LBUTTONUP:
-                self.app.refresh()
+                self.app._actions.put(("toggle", time.monotonic()))
             return 0
         if msg == WM_TIMER:
             self.app.refresh()
@@ -4750,6 +4861,8 @@ class TrayApp:
         self.panel: Optional[Panel] = None
         self._dirty = False
         self._show_requested = False
+        self._actions = queue.Queue()
+        self._tray_menu_open = False
         self._full: dict[str, bool] = {}
         self.devices = load_saved_devices()
         self._seen = None
@@ -4854,6 +4967,7 @@ class TrayApp:
             break
 
     def _show_add(self, vid: int, pid: int):
+        self._add_win = True
         try:
             ifaces = enumerate_hid()
             r = read_saved_device({"vid": vid, "pid": pid, "name": ""},
@@ -4921,7 +5035,6 @@ class TrayApp:
 
     # -- 主循?------------------------------------------------------------
     def run(self):
-        migrate_startup_link()
         self.panel = Panel(self)
         self.root = self.panel.root
         if not self.panel_only:
@@ -4930,6 +5043,22 @@ class TrayApp:
         self.refresh()
 
         def tick():
+            while not self._actions.empty():
+                action, requested_at = self._actions.get_nowait()
+                if action == "quit":
+                    self.quit()
+                elif action == "refresh":
+                    self.refresh()
+                elif action == "startup":
+                    self.panel._startup_var = startup_enabled()
+                    self.panel._toggle_startup()
+                elif action == "show":
+                    self.panel.show()
+                elif action == "toggle":
+                    if self.panel._visible:
+                        self.panel.hide()
+                    elif requested_at - self.panel._last_hidden > 0.35:
+                        self.panel.show()
             if self._hotplug_requested:
                 self._hotplug_requested = False
                 self._poll_hotplug(force=True)
@@ -4963,8 +5092,8 @@ class TrayApp:
         os._exit(0)
 
 
-APP_ID = "2.4GDevice.BatteryPanel"
-APP_DISPLAY_NAME = "2.4G"
+APP_ID = "EZ2.4G.Dashboard"
+APP_DISPLAY_NAME = "EZ2.4G Dashboard"
 
 
 def register_app_identity():
@@ -4994,7 +5123,7 @@ def run_gui(panel_only: bool = False) -> int:
     except Exception:
         UI_SCALE = 1.0
     ctypes.set_last_error(0)
-    mutex = kernel32.CreateMutexW(None, False, "Local\\BatteryTrayDSH_Mutex")
+    mutex = kernel32.CreateMutexW(None, False, "Local\\BatteryTrayDashboard_Mutex")
     if ctypes.get_last_error() == 183 and mutex:  # ERROR_ALREADY_EXISTS
         hwnd = user32.FindWindowW(Tray.CLASS_NAME, None)
         if hwnd:
